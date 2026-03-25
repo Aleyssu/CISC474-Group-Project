@@ -196,33 +196,6 @@ def project_enemy_view(enemy_wall_map: np.ndarray, enemy_pos: tuple, dir: tuple)
     return viewed_cells
 
 
-def is_trap(enemy_wall_map: np.ndarray, pos: tuple, time_steps: int) -> bool:
-    """
-    Returns true if being in the given (y, x) position is guaranteed to get the agent caught
-    at the given time step in the future, else false.
-    """
-    H, W = enemy_wall_map.shape
-
-    # Compute predicted enemy orientations and projected danger cells in the given time step
-    danger_cells = set()
-    for enemy in pinfo.enemy_positions:
-        if enemy not in pinfo.unknown_enemies:
-            projected_ori = DIRECTION_MAP[(pinfo.enemy_orientations[enemy] + time_steps) % 4]
-            for cell in project_enemy_view(enemy_wall_map, enemy, projected_ori):
-                danger_cells.add(cell)
-    
-    # Check possible movement directions for a safe tile
-    for dir in [(0, -1), (-1, 0), (1, 0), (0, 1), (0, 0)]:  # left, up, down, right, current position
-        proj_pos = (pos[0] + dir[0], pos[1] + dir[1])
-        # Position is a wall, enemy, or out of bounds (No movement)
-        if not (0 <= proj_pos[0] < H and 0 <= proj_pos[1] < W) or enemy_wall_map[proj_pos] in (2, 3):
-            proj_pos = pos
-        if proj_pos not in danger_cells:
-            return False
-    
-    return True
-
-
 def observation(grid: np.ndarray):
     """
     Function that returns the observation for the current state of the environment.
@@ -298,14 +271,11 @@ def observation(grid: np.ndarray):
         return ohe
     agent_pos = (agent_pos[0][0], agent_pos[1][0])
 
-    pinfo.trap_cells_prev = pinfo.trap_cells
-    pinfo.trap_cells = set()
     # Update observation for adjacent cells and current cell with semi-OHE encoding
-    observation_offsets = [(-1, 0), (0, 1), (1, 0), (0, -1), (0, 0)]  # left, down, right, up, stay
+    observation_offsets = [(0, -1), (-1, 0), (1, 0), (0, 1), (0, 0)]  # left, up, down, right, current position
     black_adjacent = False  # Indicates there's a safe unexplored tile in the immediate vicinity
     adjacent_explored_cells = []
-    curr_cell_danger = 0  # Indicates if the agent's current cell will be dangerous in the next time step
-    for i in range(4, -1, -1):
+    for i in range(5):
         action_offset = observation_offsets[i]
 
         # Check if adjacent cell is within bounds and get its color otherwise mark it as out of bounds
@@ -315,48 +285,32 @@ def observation(grid: np.ndarray):
             if pos in danger_cells:
                 color = COLOR_MAP[DANGER]
                 ohe[i, color] = 1
-                if i == 4: curr_cell_danger = 1
-            elif is_trap(pinfo.enemy_wall_map, pos, 1):
-                color = COLOR_MAP[DANGER]
-                ohe[i, color] = 1
-                pinfo.trap_cells.add(pos_to_int)
-                if i == 4: curr_cell_danger = 1
             elif pos in possible_danger_cells:
                 color = COLOR_MAP[POSSIBLE_DANGER]
                 ohe[i, color] = 1
-                if i == 4: curr_cell_danger = 2
             else:
                 color = COLOR_MAP[tuple(grid[pos])]
+                ohe[i, color] = 1
+
                 # Update explored cells with a semi-OHE encoding which indicates visit frequency
                 if color == COLOR_MAP[WHITE]:
                     ohe[i, color] = 1 + pinfo.prev_agent_positions_heatmap[pos_to_int]
                     adjacent_explored_cells.append(i)
                 elif color == COLOR_MAP[BLACK]:
                     black_adjacent = True
-                    ohe[i, color] = 1
-                # Treat walls and other obstacles as dangerous if the agent's current cell will be dangerous in the next time step
-                elif color == COLOR_MAP[BROWN]:
-                    if curr_cell_danger == 2:
-                        color = COLOR_MAP[POSSIBLE_DANGER]
-                    elif curr_cell_danger == 1:
-                        color = COLOR_MAP[DANGER]
-                    ohe[i, color] = 1
-                else:
-                    ohe[i, color] = 1
-
         else:
             color = COLOR_MAP[OUT_BOUNDS]
             ohe[i, color] = 1
     
     # Finding the cell of least resistance when there are no immediate unexplored tiles
     if not black_adjacent and len(adjacent_explored_cells) > 0:
-        path_of_least_resistance = 0
+        path_of_least_resistance = 4  # Default to standing still
         cell_of_least_resistance = agent_pos[0] * W + agent_pos[1]
         min_path = float('inf')
 
         for cell in adjacent_explored_cells:
-            if ohe[cell, COLOR_MAP[WHITE]] < min_path:
-                min_path = ohe[cell, COLOR_MAP[WHITE]]
+            if ohe[cell, color] < min_path:
+                min_path = ohe[cell, color]
                 path_of_least_resistance = cell
                 cell_yx = observation_offsets[cell]
                 cell_of_least_resistance = (cell_yx[0] + agent_pos[0]) * W + cell_yx[1] + agent_pos[1]
@@ -366,7 +320,6 @@ def observation(grid: np.ndarray):
         ohe[path_of_least_resistance, COLOR_MAP[WHITE]] = 0
         pinfo.prev_path_of_least_resistance = pinfo.path_of_least_resistance
         pinfo.path_of_least_resistance = cell_of_least_resistance
-
 
     # print(ohe)
     return ohe
@@ -451,9 +404,7 @@ def reward(info: dict) -> float:
     if agent_pos in pinfo.possible_dangerous_cells:
         return -100
 
-    if agent_pos in pinfo.trap_cells_prev:
-        return -200
-    elif game_over:
+    if game_over:
         return -200
 
     pinfo.prev_agent_pos = agent_pos      

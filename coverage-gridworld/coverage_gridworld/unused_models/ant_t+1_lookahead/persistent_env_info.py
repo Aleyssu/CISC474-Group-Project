@@ -1,7 +1,7 @@
 import persistent_env_info as pinfo
 import numpy as np
 
-# This tracks time-dependent information about the environment for determining more complex rewards and better observations
+# This tracks time-dependent information about the environment for determining more complex rewards
 
 def init(H, W):
     global prev_agent_pos  # Grid index of previous agent position
@@ -14,8 +14,6 @@ def init(H, W):
     global unknown_enemy_possible_orientations # Dict mapping unknown enemies to a set of their possible orientations.
     global enemy_wall_map  # Simplified grid indicating enemy and wall locations as 2's and 3's respectively to save on repeated computation
     global possible_dangerous_cells  # Set of (y, x) tuples indicating potentially dangerous cells in the next time step
-    global trap_cells_prev  # Set of (y, x) tuples cells which will result in certain death if traveled to in the next time step
-    global trap_cells  
 
     prev_agent_pos = None
 
@@ -28,5 +26,3 @@ def init(H, W):
     unknown_enemy_possible_orientations = dict()
     enemy_wall_map = None
     possible_dangerous_cells = set()
-    trap_cells = set()
-    trap_cells_prev = set()
