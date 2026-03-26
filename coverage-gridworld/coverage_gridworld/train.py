@@ -81,26 +81,69 @@ test_map = [
         [0, 0, 0, 2, 0, 0, 0, 0, 0, 0]
     ],
 
+HELD_OUT_MAPS = [
+    # unseen maze, no enemies
+    [
+        [3, 0, 0, 0, 0, 2, 0, 0, 0, 0],
+        [0, 2, 0, 2, 0, 2, 0, 2, 0, 0],
+        [0, 2, 0, 2, 0, 0, 0, 2, 2, 0],
+        [0, 0, 0, 2, 2, 2, 0, 0, 0, 0],
+        [0, 2, 0, 0, 0, 0, 0, 2, 0, 0],
+        [0, 2, 2, 0, 0, 2, 0, 2, 0, 0],
+        [0, 0, 0, 0, 0, 2, 0, 0, 0, 0],
+        [0, 2, 0, 2, 0, 0, 0, 2, 0, 0],
+        [0, 2, 0, 2, 0, 2, 0, 0, 2, 0],
+        [0, 0, 0, 0, 0, 2, 0, 0, 0, 0],
+    ],
+    # unseen maze + 2 enemies
+    [
+        [3, 0, 0, 0, 2, 0, 0, 0, 0, 0],
+        [0, 0, 2, 0, 2, 0, 0, 2, 0, 0],
+        [0, 0, 2, 0, 0, 0, 0, 2, 0, 0],
+        [0, 0, 0, 0, 2, 0, 0, 0, 0, 0],
+        [2, 2, 0, 0, 2, 0, 2, 2, 0, 0],
+        [0, 0, 0, 4, 0, 0, 0, 0, 0, 0],
+        [0, 2, 0, 0, 0, 0, 2, 0, 0, 0],
+        [0, 2, 0, 0, 2, 0, 2, 0, 4, 0],
+        [0, 0, 0, 0, 2, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    ],
+    # unseen hard maze + 4 enemies
+    [
+        [3, 0, 0, 0, 0, 2, 0, 0, 0, 0],
+        [0, 2, 0, 4, 0, 2, 0, 2, 0, 0],
+        [0, 2, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 2, 2, 0, 2, 0, 2, 0],
+        [0, 0, 0, 0, 0, 0, 2, 0, 0, 0],
+        [2, 2, 0, 0, 0, 4, 0, 0, 2, 0],
+        [0, 0, 0, 2, 0, 0, 0, 0, 2, 0],
+        [0, 0, 0, 2, 0, 0, 2, 0, 0, 0],
+        [0, 4, 0, 0, 0, 0, 2, 0, 4, 0],
+        [0, 0, 0, 0, 2, 0, 0, 0, 0, 0],
+    ],
+]
+
 # Training - default exploration rate is 0.05
 # env = gym.make("standard", predefined_map_list=maps[0:5])
 # model = DQN("MlpPolicy", env, verbose=1, device="cuda")
 # eval_callback = EvalCallback(env, 
 #                              best_model_save_path='./best_model',
 #                              log_path='./logs/', 
-#                              eval_freq=5000, 
+#                              eval_freq=1000, 
 #                              verbose=1)
-# model.learn(total_timesteps=200_000, progress_bar=True, callback=eval_callback)
+# model.learn(total_timesteps=40_000, progress_bar=True, callback=eval_callback)
 
 # # Make model always pick greediest action after training
 # model.exploration_rate = 0
 # model.save("test_model", include=["exploration_rate"])
 
-model = DQN.load("best_model/best_model_t+2_clairvoyance")
+
+model = DQN.load("best_model/best_model_t+3+Advanced_BFS")
 model.exploration_rate = 0
 
 # Testing
-env = gym.make("standard", render_mode="human", predefined_map_list=maps[0:5], activate_game_status=True)
-num_episodes = 6
+env = gym.make("standard", render_mode="human", predefined_map_list=maps[4:5], activate_game_status=True)
+num_episodes = 10
 for i in range(num_episodes):
     done = False
     obs, _ = env.reset()
@@ -111,7 +154,7 @@ for i in range(num_episodes):
 
         # Sleep may be used to allow each step to be visualized. Value can be changed
         print(obs)
-        time.sleep(0.1)
+        time.sleep(0.04)
         # break
     # time.sleep(50)
     # break

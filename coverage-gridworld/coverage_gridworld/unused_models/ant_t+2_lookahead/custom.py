@@ -1,7 +1,6 @@
 import numpy as np
 import gymnasium as gym
 import persistent_env_info as pinfo
-from collections import deque
 
 # action IDs
 LEFT = 0
@@ -59,8 +58,6 @@ COLOR_MAP = {
 }
 
 CELL_FEATURES = 6  # Number of features to encode for in any given cell
-
-np.set_printoptions(legacy='1.25') 
 
 # Observation with Semi-OHE encoding for the 4 adjacent cells and the current cell (5 total)
 def observation_space(env: gym.Env) -> gym.spaces.Space:
@@ -143,7 +140,7 @@ def update_predicted_enemy_orientations(danger_grid: np.ndarray) -> None:
         for dir in pinfo.unknown_enemy_possible_orientations[enemy_pos]:
             if deduced_enemy:
                 break
-            dir_yx = DIRECTION_MAP[(dir + pinfo.env_orientation) % 4]
+            dir_yx = DIRECTION_MAP[dir]
             for i in range(1, 5):
                 proj_pos = (i * dir_yx[0] + enemy_pos[0], i * dir_yx[1] + enemy_pos[1])
                 # Check for projected sightline being inbounds
@@ -199,152 +196,31 @@ def project_enemy_view(enemy_wall_map: np.ndarray, enemy_pos: tuple, dir: tuple)
     return viewed_cells
 
 
-def is_trap(enemy_wall_map: np.ndarray, pos: tuple, time_steps: int, recurse=1) -> bool:
+def is_trap(enemy_wall_map: np.ndarray, pos: tuple, time_steps: int) -> bool:
     """
     Returns true if being in the given (y, x) position is guaranteed to get the agent caught
     at the given time step in the future, else false.
-
-    Recursively checks the given amount of times to look even deeper into the future for
-    multi-step guaranteed fails.
     """
     H, W = enemy_wall_map.shape
+
+    # Compute predicted enemy orientations and projected danger cells in the given time step
+    danger_cells = set()
+    for enemy in pinfo.enemy_positions:
+        if enemy not in pinfo.unknown_enemies:
+            projected_ori = DIRECTION_MAP[(pinfo.enemy_orientations[enemy] + time_steps) % 4]
+            for cell in project_enemy_view(enemy_wall_map, enemy, projected_ori):
+                danger_cells.add(cell)
     
     # Check possible movement directions for a safe tile
     for dir in [(0, -1), (-1, 0), (1, 0), (0, 1), (0, 0)]:  # left, up, down, right, current position
         proj_pos = (pos[0] + dir[0], pos[1] + dir[1])
-        # Position is out of bounds
-        if not (0 <= proj_pos[0] < H and 0 <= proj_pos[1] < W):
+        # Position is a wall, enemy, or out of bounds (No movement)
+        if not (0 <= proj_pos[0] < H and 0 <= proj_pos[1] < W) or enemy_wall_map[proj_pos] in (2, 3):
             proj_pos = pos
-        # Position is clear
-        if pinfo.enemy_wall_danger_map[(pinfo.env_orientation + time_steps) % 4][proj_pos] == 0:
-            if recurse > 0:
-                if is_trap(enemy_wall_map, proj_pos, time_steps + 1, recurse - 1):
-                    continue
-                else:
-                    return False
-            else:
-                return False
-    # if time_steps == 1:
-    #     print("Trap found %s %s: %s" % (pos, pinfo.env_orientation, pinfo.enemy_wall_danger_map))
+        if proj_pos not in danger_cells:
+            return False
+    
     return True
-
-
-def bfs_empty_cell(enemy_wall_map: np.ndarray, explored_map: np.ndarray, agent_pos: tuple):
-    """
-    Using breadth first search, generates a list of (y, x) cell coords painting a greedy path leading towards the
-    nearest empty cell for the agent. Saves the result in pinfo.bfs_cell_coords for the agent to use.
-
-    explored_map is a binary matrix with 1 for explored cells and 0 for any other cells.
-
-    Note: does not account for enemies
-    """
-    H, W = enemy_wall_map.shape
-    q = deque([agent_pos])  # FIFO queue to track positions to search
-    pos_trace = dict()  # Contains (y, x) : (y, x) pairs mapping a position back to the agent
-    path = deque()  # Stack of (y, x) tuples leading the agent towards the nearest empty cell
-    checked_cells = set()
-
-    found_empty_cell = False
-    while len(q) > 0 and not found_empty_cell:
-        pos = q.popleft()
-
-        # Skip if we've already checked this cell before
-        if pos in checked_cells:
-            continue
-
-        for dir in DIRECTIONS:
-            proj_pos = (dir[0] + pos[0], dir[1] + pos[1])
-
-            # Skip if direction is out of bounds, obstructed, or already checked before
-            if not (0 <= proj_pos[0] < H and 0 <= proj_pos[1] < W) or enemy_wall_map[proj_pos] != 0 or proj_pos in checked_cells:
-                continue
-            # Found empty cell - construct path leading from the agent to the cell
-            elif explored_map[proj_pos] == 0:
-                found_empty_cell = True
-                path.append(proj_pos)
-                while pos != agent_pos:
-                    path.append(pos)
-                    pos = pos_trace[pos]
-                break
-            else:
-                pos_trace[proj_pos] = pos
-                q.append(proj_pos)
-
-        checked_cells.add(pos)
-    
-    if not found_empty_cell:
-        pinfo.following_bfs = False
-    else:
-        pinfo.bfs_cell_coords = path
-        pinfo.following_bfs = True       
-        pinfo.just_started_following_bfs = True
-
-
-def advanced_bfs_empty_cell(explored_map: np.ndarray, agent_pos: tuple):
-    """
-    Using BFS search with consideration for predicted danger cells, generates a list of (y, x) 
-    cell coords painting a safe path leading towards the nearest empty cell for the agent. 
-    
-    Saves the result in pinfo.bfs_cell_coords for the agent to use.
-
-    Note: due to backtracking and standing still being exploration options to account for
-    the 4 different possible enemy orientations, the search space is effectively quadrupled
-    when using this algorithm instead of the above bfs algorithm. In a nutshell, this one is 
-    much more computationally expensive.
-
-    If force_danger is True, the algorithm will treat trap cells as valid search targets.
-    """
-    H, W = pinfo.enemy_wall_map.shape
-    agent_posq = (agent_pos, pinfo.env_orientation - 1)
-    q = deque([agent_posq])  # FIFO queue to track positions to search
-    pos_trace = dict()  # Contains ((y, x), i): ((y, x), i) pairs mapping a position back to the agent with i being the relative rotation of the enemies
-    path = deque()  # Stack of (y, x) tuples leading the agent towards the nearest empty cell
-    checked_cells = set()
-
-    found_empty_cell = False
-    while len(q) > 0 and not found_empty_cell:
-        pos, env_ori = q.popleft()
-        next_env_ori = (env_ori + 1) % 4
-
-        for dir in [(0, -1), (-1, 0), (1, 0), (0, 1), (0, 0)]:  # left, up, down, right, stay
-            proj_pos = (dir[0] + pos[0], dir[1] + pos[1])
-
-            # Skip if direction is out of bounds, obstructed, or already checked before
-            if not (0 <= proj_pos[0] < H and 0 <= proj_pos[1] < W) or pinfo.enemy_wall_danger_map[next_env_ori][proj_pos] not in (0, 5) or proj_pos in checked_cells:
-                continue
-            # Found empty cell - construct path leading from the agent to the cell
-            elif explored_map[proj_pos] == 0:
-                # Skip if empty cell is a trap cell and we're not looking to die yet
-                # print(pinfo.enemy_wall_danger_map[next_env_ori])
-                if not pinfo.push_traps and pinfo.enemy_wall_danger_map[next_env_ori][proj_pos] == 5:
-                    continue
-                elif not pinfo.push_traps and is_trap(pinfo.enemy_wall_map, proj_pos, abs(next_env_ori - pinfo.env_orientation + 1) % 4):
-                    # pinfo.enemy_wall_danger_map[abs(next_env_ori - pinfo.env_orientation + 1) % 4][proj_pos] = 5
-                    # print("Found projected danger %s %s %s" % (pos, proj_pos, abs(next_env_ori - pinfo.env_orientation + 1) % 4))
-                    continue
-                found_empty_cell = True
-                path.append(proj_pos)
-                # print("%s: %s" % ((proj_pos, next_env_ori), (pos, env_ori)))
-                while (pos, env_ori) != agent_posq:
-                    path.append(pos)
-                    pos, env_ori = pos_trace[(pos, env_ori)]
-                break
-            else:
-                posq = (proj_pos, next_env_ori)
-                if not (posq in checked_cells or posq in q):
-                    q.append(posq)
-                if not posq in checked_cells:
-                    pos_trace[posq] = (pos, env_ori)
-                    # print("%s: %s" % (posq, (pos, env_ori)))
-
-        checked_cells.add((pos, env_ori))
-    
-    if not found_empty_cell:
-        pinfo.following_bfs = False
-    else:
-        pinfo.bfs_cell_coords = path
-        pinfo.following_bfs = True       
-        pinfo.just_started_following_bfs = True
 
 
 def observation(grid: np.ndarray):
@@ -355,7 +231,7 @@ def observation(grid: np.ndarray):
 
     # Reset persistent info if all cells are uncleared (new episode)
     cleared_cells = np.zeros((H, W), dtype=np.uint8)
-    mask = np.logical_or(np.all(grid == WHITE, axis=-1), np.all(grid == LIGHT_RED, axis=-1))
+    mask = np.all(grid == WHITE, axis=-1)
     cleared_cells[mask] = 1
     if np.sum(cleared_cells) == 0:
         # print("Clearing persistent info for new episode")
@@ -372,53 +248,39 @@ def observation(grid: np.ndarray):
         danger_mask = np.logical_or(np.all(grid == RED, axis=-1), np.all(grid == LIGHT_RED, axis=-1))
         pinfo.enemy_wall_map = 2 * enemy_mask + 3 * wall_mask 
         danger_grid = danger_mask + pinfo.enemy_wall_map  # Create a grid where 0 is safe, 1 is danger, 2 is enemy, and 3 is wall
-        pinfo.enemy_wall_danger_map[pinfo.env_orientation] = danger_grid  # Update danger cell layout for the current env orientation experienced data
-
-        for i in range(1, 4):
-            pinfo.enemy_wall_danger_map[i] = pinfo.enemy_wall_map.copy()
 
         update_predicted_enemy_orientations(danger_grid)
     # Try to deduce unknown enemy orientations if there's any left
     elif len(pinfo.unknown_enemies) > 0:
         danger_mask = np.logical_or(np.all(grid == RED, axis=-1), np.all(grid == LIGHT_RED, axis=-1))
         danger_grid = danger_mask + pinfo.enemy_wall_map
-        pinfo.enemy_wall_danger_map[pinfo.env_orientation] = danger_grid  # Update danger cell layout for the current env orientation experienced data
         update_predicted_enemy_orientations(danger_grid)
-    
-    pinfo.env_orientation = (pinfo.env_orientation + 1) % 4
 
-    if len(pinfo.unknown_enemies) == 0:
-        # When the enemy orientations are known, finish computing the rest of the danger cell layouts
-        if not pinfo.enemy_orientations_computed:
-            for i in range(pinfo.env_orientation, 4):
-                # Compute predicted enemy orientations and projected danger cells in the given time step
-                for enemy in pinfo.enemy_positions:
-                    projected_ori = DIRECTION_MAP[(pinfo.enemy_orientations[enemy] + i) % 4]
-                    for cell in project_enemy_view(pinfo.enemy_wall_map, enemy, projected_ori):
-                        pinfo.enemy_wall_danger_map[i][cell] = 1
-            pinfo.enemy_orientations_computed = True
-            
-            # print(pinfo.enemy_wall_danger_map)
-            pinfo.possible_dangerous_cells = set()
+    # Update enemy orientations for the next time step
+    for enemy in pinfo.enemy_positions:
+        if enemy not in pinfo.unknown_enemies:
+            pinfo.enemy_orientations[enemy] = (pinfo.enemy_orientations[enemy] + 1) % 4
+        else:
+            possible_ori = set()
+            for ori in pinfo.unknown_enemy_possible_orientations[enemy]:
+                possible_ori.add((ori + 1) % 4)
+            pinfo.unknown_enemy_possible_orientations[enemy] = possible_ori
 
-    # Otherwise, project caution cells where danger cells might be in the next time step
-    else:            
-        pinfo.enemy_wall_danger_map[pinfo.env_orientation] = pinfo.enemy_wall_map.copy()
-        # Predict where the danger cells will be in the next time step
-        possible_danger_cells = set()  # Contains (y, x) tuples for cells that might be dangerous in the next time step
-        pinfo.possible_dangerous_cells = set()
-        for enemy in pinfo.enemy_positions:
-            # Cells that may be seen by enemies with yet to be determined orientations
-            if enemy in pinfo.unknown_enemies:
-                for dir in pinfo.unknown_enemy_possible_orientations[enemy]:
-                    for cell in project_enemy_view(pinfo.enemy_wall_map, enemy, DIRECTION_MAP[(dir + pinfo.env_orientation) % 4]):
-                        possible_danger_cells.add(cell)
-                        pinfo.possible_dangerous_cells.add(cell[0] * W + cell[1])
-            # Cells that will certainly be seen by enemies
-            else:
-                for i in range(pinfo.env_orientation, 4):
-                    for cell in project_enemy_view(pinfo.enemy_wall_map, enemy, DIRECTION_MAP[(pinfo.enemy_orientations[enemy] + i) % 4]):
-                        pinfo.enemy_wall_danger_map[i][cell] = 1
+    # Predict where the danger cells will be in the next time step
+    possible_danger_cells = set()  # Contains (y, x) tuples for cells that might be dangerous in the next time step
+    pinfo.possible_dangerous_cells = set()
+    danger_cells = set()
+    for enemy in pinfo.enemy_positions:
+        # Cells that may be seen by enemies with yet to be determined orientations
+        if enemy in pinfo.unknown_enemies:
+            for dir in pinfo.unknown_enemy_possible_orientations[enemy]:
+                for cell in project_enemy_view(pinfo.enemy_wall_map, enemy, DIRECTION_MAP[dir]):
+                    possible_danger_cells.add(cell)
+                    pinfo.possible_dangerous_cells.add(cell[0] * W + cell[1])
+        # Cells that will certainly be seen by enemies
+        else:
+            for cell in project_enemy_view(pinfo.enemy_wall_map, enemy, DIRECTION_MAP[pinfo.enemy_orientations[enemy]]):
+                danger_cells.add(cell)
 
     # For debugging
     # print_map = pinfo.enemy_wall_map.copy()
@@ -435,14 +297,13 @@ def observation(grid: np.ndarray):
     if(len(agent_pos[0]) == 0):
         return ohe
     agent_pos = (agent_pos[0][0], agent_pos[1][0])
-    cleared_cells[agent_pos] = 1
 
     pinfo.trap_cells_prev = pinfo.trap_cells
     pinfo.trap_cells = set()
     # Update observation for adjacent cells and current cell with semi-OHE encoding
-    observation_offsets = [(-1, 0), (0, 1), (1, 0), (0, -1), (0, 0)]  # up, right, down, left, stay - don't change the order of these pls
+    observation_offsets = [(-1, 0), (0, 1), (1, 0), (0, -1), (0, 0)]  # left, down, right, up, stay
     black_adjacent = False  # Indicates there's a safe unexplored tile in the immediate vicinity
-    adjacent_explored_cells = []  # Indices of observation_offsets indicating directions of adjacent explored cells
+    adjacent_explored_cells = []
     curr_cell_danger = 0  # Indicates if the agent's current cell will be dangerous in the next time step
     for i in range(4, -1, -1):
         action_offset = observation_offsets[i]
@@ -451,23 +312,16 @@ def observation(grid: np.ndarray):
         pos = (agent_pos[0] + action_offset[0], agent_pos[1] + action_offset[1])
         pos_to_int = (pos[0] * W + pos[1])
         if 0 <= pos[0] < H and 0 <= pos[1] < W:
-            # Position is dangerous
-            if pinfo.enemy_wall_danger_map[pinfo.env_orientation][pos] == 1:
+            if pos in danger_cells:
                 color = COLOR_MAP[DANGER]
                 ohe[i, color] = 1
                 if i == 4: curr_cell_danger = 1
-            elif pinfo.enemy_wall_danger_map[pinfo.env_orientation][pos] == 5 and not pinfo.push_traps:
-                color = COLOR_MAP[DANGER]
-                if i == 4: curr_cell_danger = 1
-                ohe[i, color] = 1
-            elif is_trap(pinfo.enemy_wall_map, pos, 1) and not pinfo.push_traps:
+            elif is_trap(pinfo.enemy_wall_map, pos, 1):
                 color = COLOR_MAP[DANGER]
                 ohe[i, color] = 1
                 pinfo.trap_cells.add(pos_to_int)
-                pinfo.enemy_wall_danger_map[pinfo.env_orientation][pos] = 5  # Treat the trap cell as a danger cell in future computations so we don't need to recompute
-                # print(pinfo.env_orientation, pinfo.enemy_wall_danger_map)
                 if i == 4: curr_cell_danger = 1
-            elif not pinfo.enemy_orientations_computed and pos in possible_danger_cells:
+            elif pos in possible_danger_cells:
                 color = COLOR_MAP[POSSIBLE_DANGER]
                 ohe[i, color] = 1
                 if i == 4: curr_cell_danger = 2
@@ -475,7 +329,7 @@ def observation(grid: np.ndarray):
                 color = COLOR_MAP[tuple(grid[pos])]
                 # Update explored cells with a semi-OHE encoding which indicates visit frequency
                 if color == COLOR_MAP[WHITE]:
-                    ohe[i, color] = 1
+                    ohe[i, color] = 1 + pinfo.prev_agent_positions_heatmap[pos_to_int]
                     adjacent_explored_cells.append(i)
                 elif color == COLOR_MAP[BLACK]:
                     black_adjacent = True
@@ -489,56 +343,63 @@ def observation(grid: np.ndarray):
                     ohe[i, color] = 1
                 else:
                     ohe[i, color] = 1
+
         else:
-            # Treat out of bounds iwth same logic as walls
-            if curr_cell_danger == 2:
-                color = COLOR_MAP[POSSIBLE_DANGER]
-            elif curr_cell_danger == 1:
-                color = COLOR_MAP[DANGER]
-            else:
-                color = COLOR_MAP[OUT_BOUNDS]
+            color = COLOR_MAP[OUT_BOUNDS]
             ohe[i, color] = 1
     
-    # Navigate the agent towards the nearest empty cell if there's no immediate empty cells in its vicinity
-    if (not black_adjacent or pinfo.following_bfs) and len(adjacent_explored_cells) > 0:
-        if not pinfo.following_bfs:
-            # bfs_empty_cell(pinfo.enemy_wall_map, cleared_cells, agent_pos)
-            advanced_bfs_empty_cell(cleared_cells, agent_pos)
-            # print("Recomputed BFS: %s" % pinfo.bfs_cell_coords)
-            # print(pinfo.enemy_wall_danger_map)
-            if not pinfo.following_bfs:
-                # print("No more non-trap tiles")
-                pinfo.push_traps = True
-        if pinfo.following_bfs and len(pinfo.bfs_cell_coords) > 0:
-            bfs_viable = False
-            target_cell = pinfo.bfs_cell_coords.pop()
-            if pinfo.just_started_following_bfs:
-                pinfo.path_of_least_resistance = agent_pos[0] * W + agent_pos[1]
-                pinfo.just_started_following_bfs = False
-            # Find the direction of the path cell and update the OHE 
-            for cell in adjacent_explored_cells:
-                cell_yx = observation_offsets[cell]
-                if target_cell == (cell_yx[0] + agent_pos[0], cell_yx[1] + agent_pos[1]):
-                    bfs_viable = True
-                    ohe[cell, COLOR_MAP[WHITE]] = 0
-                    ohe[cell, COLOR_MAP[PATH_OF_LEAST_RESISTANCE]] = 1       
-                    pinfo.prev_path_of_least_resistance = pinfo.path_of_least_resistance
-                    pinfo.path_of_least_resistance = target_cell[0] * W + target_cell[1]    
-                    break
-            # In case it's not possible to make it to the next cell in the path
-            if not bfs_viable:
-                # If we can't wait, bail on the bfs policy
-                if curr_cell_danger > 0:
-                    pinfo.following_bfs = False
-                # Otherwise, just wait and try again next turn
-                else:
-                    ohe[4, COLOR_MAP[WHITE]] = 0
-                    ohe[4, COLOR_MAP[PATH_OF_LEAST_RESISTANCE]] = 1     
-                    pinfo.bfs_cell_coords.append(target_cell)
-                    pinfo.prev_path_of_least_resistance = pinfo.path_of_least_resistance
-                    pinfo.path_of_least_resistance = agent_pos[0] * W + agent_pos[1] 
+    # Finding the cell of least resistance when there are no immediate unexplored tiles
+    if not black_adjacent and len(adjacent_explored_cells) > 0:
+        path_of_least_resistance = 0
+        cell_of_least_resistance = agent_pos[0] * W + agent_pos[1]
+        min_path = float('inf')
 
+        for cell in adjacent_explored_cells:
+            if ohe[cell, COLOR_MAP[WHITE]] < min_path:
+                min_path = ohe[cell, COLOR_MAP[WHITE]]
+                path_of_least_resistance = cell
+                cell_yx = observation_offsets[cell]
+                cell_of_least_resistance = (cell_yx[0] + agent_pos[0]) * W + cell_yx[1] + agent_pos[1]
+
+        # Select the cell of least resistance
+        ohe[path_of_least_resistance, COLOR_MAP[PATH_OF_LEAST_RESISTANCE]] = 1
+        ohe[path_of_least_resistance, COLOR_MAP[WHITE]] = 0
+        pinfo.prev_path_of_least_resistance = pinfo.path_of_least_resistance
+        pinfo.path_of_least_resistance = cell_of_least_resistance
+
+
+    # print(ohe)
     return ohe
+
+
+# Global observation with OHE encoding for each type of tile
+
+# def observation_space(env: gym.Env) -> gym.spaces.Space:
+#     """
+#     Observation space from Gymnasium (https://gymnasium.farama.org/api/spaces/)
+#     """
+#     observation_space = gym.spaces.Box(
+#         low=0,
+#         high=1,
+#         shape=(env.grid.shape[0], env.grid.shape[1], len(COLOR_MAP)),
+#         dtype=np.uint8
+#     )
+
+#     return observation_space
+
+
+# def observation(grid: np.ndarray):
+#     """
+#     Function that returns the observation for the current state of the environment.
+#     """
+#     H, W, _ = grid.shape
+#     ohe = np.zeros((H, W, len(COLOR_MAP)), dtype=np.uint8)
+
+#     for color, idx in COLOR_MAP.items():
+#         mask = np.all(grid == color, axis=-1)
+#         ohe[mask, idx] = 1
+
+#     return ohe
 
 
 def reward(info: dict) -> float:
@@ -568,30 +429,32 @@ def reward(info: dict) -> float:
     new_cell_covered = info["new_cell_covered"]
     game_over = info["game_over"]
 
+    # IMPORTANT: You may design a reward function that uses just some of these values. Experiment with different
+    # rewards and find out what works best for the algorithm you chose given the observation space you are using
+
     reward = 0
 
     if new_cell_covered:
         reward += 1
-
-    if cells_remaining == 0:
-        return steps_remaining
+    elif pinfo.prev_agent_pos == agent_pos and not agent_pos == pinfo.prev_path_of_least_resistance:
+        reward -= 0.1
     
-    if pinfo.following_bfs: 
+    if agent_pos in pinfo.prev_agent_positions_heatmap.keys():
         if not agent_pos == pinfo.prev_path_of_least_resistance:
-            if not len(pinfo.bfs_cell_coords) == 0:
-                reward -= 1
-            pinfo.following_bfs = False
+            reward -= 0.1 * pinfo.prev_agent_positions_heatmap[agent_pos]  # More penalty for visiting recently visited cells more often
+        
+        pinfo.prev_agent_positions_heatmap[agent_pos] += 0.5
+    else:
+        pinfo.prev_agent_positions_heatmap[agent_pos] = 0.5
     
     # Punish for taking unneccessary risks
     if agent_pos in pinfo.possible_dangerous_cells:
         return -100
 
-    # Reward agent for making a last stand in impossible maps and punish for going into danger cells otherwise
-    if agent_pos in pinfo.trap_cells_prev or game_over:
-        if pinfo.push_traps and len(pinfo.bfs_cell_coords) <= 1:
-            return steps_remaining
-        else:
-            return -200
+    if agent_pos in pinfo.trap_cells_prev:
+        return -200
+    elif game_over:
+        return -200
 
     pinfo.prev_agent_pos = agent_pos      
     return reward
