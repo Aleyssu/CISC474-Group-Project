@@ -138,7 +138,7 @@ HELD_OUT_MAPS = [
 # model.save("test_model", include=["exploration_rate"])
 
 
-model = DQN.load("best_model/final_model")
+model = DQN.load("../../models/final_model")
 model.exploration_rate = 0
 
 # Testing

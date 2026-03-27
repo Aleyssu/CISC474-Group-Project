@@ -1,6 +1,6 @@
 import numpy as np
 import gymnasium as gym
-import persistent_env_info as pinfo
+from coverage_gridworld import persistent_env_info as pinfo
 from collections import deque
 
 # action IDs
