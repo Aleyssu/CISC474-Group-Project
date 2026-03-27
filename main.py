@@ -1,8 +1,15 @@
 import random
 import time
 import gymnasium
+from stable_baselines3 import DQN
 import coverage_gridworld  # must be imported, even though it's not directly referenced
 
+# action IDs
+LEFT = 0
+DOWN = 1
+RIGHT = 2
+UP = 3
+STAY = 4
 
 def human_player():
     # Write the letter for the desired movement in the terminal/console and then press Enter
@@ -89,18 +96,21 @@ maps = [
     ]
 ]
 
-env = gymnasium.make("sneaky_enemies", render_mode="human", predefined_map_list=None, activate_game_status=True)
+env = gymnasium.make("sneaky_enemies", render_mode="human", predefined_map_list=maps, activate_game_status=True)
 num_episodes = 5
 
+model = DQN.load("models/final_model")
+
 for i in range(num_episodes):
-    env.reset()
+    obs, _ = env.reset()
+
     done = False
     while not done:
-        action = human_player()
+        action, _ = model.predict(obs, deterministic=True)
         obs, reward, done, truncated, info = env.step(action)
-
+        
         # Sleep may be used to allow each step to be visualized. Value can be changed
-        #time.sleep(0.2)
+        time.sleep(0.1)
     if done:
         time.sleep(2)
 env.close()
