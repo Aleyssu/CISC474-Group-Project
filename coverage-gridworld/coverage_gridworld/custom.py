@@ -509,12 +509,6 @@ def observation(grid: np.ndarray):
                 color = COLOR_MAP[OUT_BOUNDS]
             ohe[i, color] = 1
         
-        # Make danger cells look enticing if we're trying to die
-        if pinfo.push_danger and ohe[i, COLOR_MAP[DANGER]] == 1:
-            ohe[i, COLOR_MAP[DANGER]] = 0
-            ohe[i, COLOR_MAP[PATH_OF_LEAST_RESISTANCE]] = 1
-            # print("\n---------------------------\nPUSHING DANGER\n---------------------------\n")
-    
     # Navigate the agent towards the nearest empty cell if there's no immediate empty cells in its vicinity
     if (not black_adjacent or pinfo.following_bfs) and len(adjacent_explored_cells) > 0:
         if not pinfo.following_bfs:
@@ -555,6 +549,14 @@ def observation(grid: np.ndarray):
                     pinfo.bfs_cell_coords.append(target_cell)
                     pinfo.prev_path_of_least_resistance = pinfo.path_of_least_resistance
                     pinfo.path_of_least_resistance = agent_pos[0] * W + agent_pos[1] 
+    
+    # Make danger cells look enticing if we're trying to die
+    if pinfo.push_danger:
+        for i in range(4):
+            if ohe[i, COLOR_MAP[DANGER]] == 1:
+                ohe[i, COLOR_MAP[DANGER]] = 0
+                ohe[i, COLOR_MAP[PATH_OF_LEAST_RESISTANCE]] = 1
+                # print("\n---------------------------\nPUSHING DANGER\n---------------------------\n")
 
     return ohe
 
