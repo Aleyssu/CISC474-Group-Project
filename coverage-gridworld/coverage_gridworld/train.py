@@ -125,20 +125,20 @@ HELD_OUT_MAPS = [
 
 # Training - default exploration rate is 0.05
 # env = gym.make("standard", predefined_map_list=maps[0:5])
-# model = DQN("MlpPolicy", env, verbose=1, device="cuda")
+# model = DQN("MlpPolicy", env, verbose=1, device="cuda", learning_rate=0.001)
 # eval_callback = EvalCallback(env, 
 #                              best_model_save_path='./best_model',
 #                              log_path='./logs/', 
-#                              eval_freq=1000, 
+#                              eval_freq=500, 
 #                              verbose=1)
-# model.learn(total_timesteps=40_000, progress_bar=True, callback=eval_callback)
+# model.learn(total_timesteps=20_000, progress_bar=True, callback=eval_callback)
 
 # # Make model always pick greediest action after training
 # model.exploration_rate = 0
 # model.save("test_model", include=["exploration_rate"])
 
 
-model = DQN.load("best_model/best_model_t+3+Advanced_BFS")
+model = DQN.load("best_model/final_model")
 model.exploration_rate = 0
 
 # Testing
