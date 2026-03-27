@@ -34,18 +34,6 @@ maps = [
         [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
     ],
     [
-        [3, 0, 0, 2, 0, 0, 0, 0, 0, 0],
-        [0, 0, 0, 0, 0, 0, 0, 0, 2, 0],
-        [0, 2, 0, 2, 2, 2, 2, 2, 2, 0],
-        [0, 2, 0, 0, 0, 2, 0, 0, 0, 0],
-        [0, 2, 0, 2, 0, 2, 0, 0, 2, 0],
-        [0, 0, 0, 2, 2, 2, 0, 0, 0, 0],
-        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-        [0, 0, 0, 0, 0, 0, 0, 0, 2, 0],
-        [0, 0, 0, 2, 0, 0, 0, 0, 0, 2],
-        [0, 0, 0, 2, 0, 0, 0, 2, 2, 2]
-    ],
-    [
         [3, 0, 0, 2, 0, 2, 0, 0, 0, 0],
         [0, 2, 0, 0, 0, 2, 0, 0, 2, 0],
         [0, 2, 0, 2, 2, 2, 2, 2, 2, 0],
@@ -57,10 +45,7 @@ maps = [
         [0, 2, 0, 2, 0, 2, 2, 0, 0, 0],
         [0, 0, 0, 0, 0, 2, 0, 0, 0, 0]
     ],
-]
-
-extras = [
-    [
+        [
         [3, 2, 0, 0, 0, 0, 2, 0, 0, 0],
         [0, 2, 0, 2, 2, 0, 2, 0, 2, 2],
         [0, 2, 0, 2, 0, 0, 2, 0, 0, 0],
@@ -80,8 +65,8 @@ extras = [
         [0, 0, 0, 2, 2, 2, 2, 0, 0, 0],
         [0, 0, 2, 0, 0, 0, 0, 4, 0, 0],
         [0, 0, 2, 0, 0, 0, 0, 0, 0, 0],
-        [0, 0, 2, 0, 4, 0, 0, 0, 2, 2],
-        [0, 0, 0, 0, 0, 0, 0, 0, 0, 2],
+        [0, 0, 2, 0, 2, 0, 0, 0, 2, 2],
+        [0, 0, 0, 0, 2, 0, 0, 0, 0, 2],
         [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
     ],
     [
@@ -95,7 +80,10 @@ extras = [
         [0, 0, 2, 0, 0, 0, 0, 2, 0, 0],
         [0, 0, 0, 0, 4, 0, 4, 2, 0, 0],
         [0, 0, 0, 0, 0, 0, 0, 2, 0, 0]
-    ]
+    ],
+]
+
+extras = [
 ]
 '''
 class GridCNN(BaseFeaturesExtractor):
@@ -155,13 +143,15 @@ if __name__ == "__main__":
     # Training - default exploration rate is 0.05
     prev_model_path = None
     #prev_model_path = "best_model/best_model"
+    """
+    env = gym.make("standard", predefined_map_list=maps[0:6])
     '''
-    env = gym.make("standard", predefined_map_list=maps[0:4])
     policy_kwargs = dict(
         features_extractor_class=PatchAndDirExtractor,
         features_extractor_kwargs=dict(features_dim=128),
         normalize_images=False,
     )
+    '''
     if prev_model_path:
         model = PPO.load(prev_model_path, env=env, verbose=1, device="cpu")
     else:
@@ -175,16 +165,16 @@ if __name__ == "__main__":
         )
 
     eval_callback = EvalCallback(env, best_model_save_path="./best_model", eval_freq=5000, verbose=1)
-    model.learn(total_timesteps=200_000, progress_bar=True, callback=eval_callback)
+    model.learn(total_timesteps=400_000, progress_bar=True, callback=eval_callback)
 
     # model.exploration_rate = 0
     model.save("test_model")
-    '''
+    """
     model = PPO.load("best_model/best_model")
 
     # Testing
-    env = gym.make("standard", render_mode="human", predefined_map_list=maps[0:4], activate_game_status=True)
-    num_episodes = 4
+    env = gym.make("standard", render_mode="human", predefined_map_list=maps[0:6], activate_game_status=True)
+    num_episodes = 6
     for i in range(num_episodes):
         done = False
         obs, _ = env.reset()
