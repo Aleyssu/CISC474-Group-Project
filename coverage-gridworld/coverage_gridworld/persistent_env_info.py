@@ -24,6 +24,7 @@ def init(H, W):
     global just_started_following_bfs  # Indicates whether the agent has just started following a search policy
     global push_traps  # Determines whether the agent will force its way into trap cells as a last resort
     global push_danger  # Determines whether the agent will try to kill itself in impossible situations
+    global is_dying  # If true, floods the agent's senses with pheromones as they die so that they don't learn to associate anything else with reward
 
     prev_agent_pos = None
 
@@ -45,3 +46,4 @@ def init(H, W):
     env_orientation = 0
     push_traps = False
     push_danger = False
+    is_dying = False
