@@ -178,6 +178,16 @@ def update_predicted_enemy_orientations() -> None:
             if len(pinfo.unknown_enemy_possible_orientations[enemy_pos]) == 1:
                 pinfo.unknown_enemies.remove(enemy_pos)
                 pinfo.enemy_orientations[enemy_pos] = pinfo.unknown_enemy_possible_orientations[enemy_pos].pop()
+                deduced_enemies.append(enemy_pos)
+    
+    # Update danger grids in the future for the deduced enemies
+    for enemy in deduced_enemies:
+        for env_ori in range(pinfo.env_orientation + 1, 4):
+            projected_ori = DIRECTION_MAP[(pinfo.enemy_orientations[enemy] + env_ori) % 4]
+            for cell in project_enemy_view(enemy, projected_ori):
+                pinfo.enemy_wall_danger_map[env_ori][cell] = 1
+
+
     
     # print("Unknowns: %s, Known Orientations: %s, Unknown Possible Orientations: %s" % (pinfo.unknown_enemies, pinfo.enemy_orientations, pinfo.unknown_enemy_possible_orientations))
 
@@ -290,7 +300,7 @@ def bfs_empty_cell(enemy_wall_map: np.ndarray, explored_map: np.ndarray, agent_p
 def advanced_bfs_empty_cell(explored_map: np.ndarray, agent_pos: tuple):
     """
     Using BFS search with consideration for predicted danger cells, generates a list of (y, x) 
-    cell coords painting a safe path leading towards the nearest empty cell for the agent. 
+    cell coords painting a safe path leading towards the nearest safe empty cell for the agent. 
     
     Saves the result in pinfo.bfs_cell_coords for the agent to use.
 
@@ -299,7 +309,8 @@ def advanced_bfs_empty_cell(explored_map: np.ndarray, agent_pos: tuple):
     when using this algorithm instead of the above bfs algorithm. In a nutshell, this one is 
     much more computationally expensive.
 
-    If force_danger is True, the algorithm will treat danger cells as valid search targets.
+    If pinfo.force_trap is True, trapped empty cells will be treated as valid search targets
+    If pinfo.force_danger is True, the algorithm will treat danger cells as valid search targets.
     """
     H, W = pinfo.enemy_wall_map.shape
     agent_posq = (agent_pos, pinfo.env_orientation - 1)
@@ -399,7 +410,7 @@ def observation(grid: np.ndarray):
 
         update_predicted_enemy_orientations()
     # Try to deduce unknown enemy orientations if there's any left
-    elif len(pinfo.unknown_enemies) > 0:
+    elif not pinfo.enemy_orientations_computed:
         danger_mask = np.logical_or(np.all(grid == RED, axis=-1), np.all(grid == LIGHT_RED, axis=-1))
         danger_grid = danger_mask + pinfo.enemy_wall_map
         pinfo.enemy_wall_danger_map[pinfo.env_orientation] = danger_grid
@@ -408,19 +419,12 @@ def observation(grid: np.ndarray):
     # Start looking one time step into the future
     pinfo.env_orientation = (pinfo.env_orientation + 1) % 4  
 
-    if len(pinfo.unknown_enemies) == 0:
-        # When the enemy orientations are known, finish computing the rest of the danger cell layouts
-        if not pinfo.enemy_orientations_computed:
-            for i in range(pinfo.env_orientation, 4):
-                # Compute predicted enemy orientations and projected danger cells in the given time step
-                for enemy in pinfo.enemy_positions:
-                    projected_ori = DIRECTION_MAP[(pinfo.enemy_orientations[enemy] + i) % 4]
-                    for cell in project_enemy_view(enemy, projected_ori):
-                        pinfo.enemy_wall_danger_map[i][cell] = 1
-            pinfo.enemy_orientations_computed = True
-            
-            # print("Deduced Enemies:\n%s" % pinfo.enemy_wall_danger_map)
-            pinfo.possible_dangerous_cells = set()
+    if not pinfo.enemy_orientations_computed and len(pinfo.unknown_enemies) == 0:
+        pinfo.enemy_orientations_computed = True
+        pinfo.possible_dangerous_cells = set()
+        # print("Deduced Enemies:\n")
+        # for x in pinfo.enemy_wall_danger_map:
+        #     print(pinfo.enemy_wall_danger_map[x])
 
     # Otherwise, project caution cells where danger cells might be in the next time step
     else:            
@@ -530,8 +534,8 @@ def observation(grid: np.ndarray):
             ohe[i, color] = 1
         
     # Navigate the agent towards the nearest empty cell if there's no immediate empty cells in its vicinity
-    if not black_adjacent or pinfo.following_bfs:
-        if not pinfo.following_bfs or len(pinfo.bfs_cell_coords) == 0:
+    if not black_adjacent and pinfo.enemy_orientations_computed or len(pinfo.bfs_cell_coords) > 0:
+        if (not pinfo.following_bfs or len(pinfo.bfs_cell_coords) == 0) and not (pinfo.push_danger or pinfo.push_traps):
             advanced_bfs_empty_cell(cleared_cells, agent_pos)
             # print("Recomputed BFS: %s" % pinfo.bfs_cell_coords)
             if not pinfo.following_bfs:
@@ -539,9 +543,8 @@ def observation(grid: np.ndarray):
                 pinfo.push_traps = True
                 advanced_bfs_empty_cell(cleared_cells, agent_pos)
                 # print("Recomputed BFS (Trap): %s" % pinfo.bfs_cell_coords)
-
                 # In case all remaining empty cells are impossible to clear, push into a danger cell asap to end the run
-                if not pinfo.following_bfs:    
+                if not pinfo.following_bfs:
                     pinfo.push_danger = True
                     advanced_bfs_empty_cell(cleared_cells, agent_pos)
                     # print("Recomputed BFS (Danger): %s" % pinfo.bfs_cell_coords)
@@ -575,11 +578,18 @@ def observation(grid: np.ndarray):
                         if ohe[i, COLOR_MAP[DANGER]] == 1:
                             ohe[i, COLOR_MAP[PATH_OF_LEAST_RESISTANCE]] = 1
                             ohe[i, COLOR_MAP[DANGER]] = 0
+                        else:
+                            ohe[i, :] = 0
+                            ohe[i, COLOR_MAP[DANGER]] = 1
 
     else:
-        # The agent has just reached a trap cell during its last stand
-        if pinfo.push_traps and len(pinfo.bfs_cell_coords) == 0:
-            pinfo.is_dying = True
+        if black_adjacent and pinfo.following_bfs:
+            pinfo.bfs_cell_coords = deque()
+            pinfo.following_bfs = False
+            
+    # The agent has just reached a trap cell during its last stand
+    if pinfo.push_traps and len(pinfo.bfs_cell_coords) == 0:
+        pinfo.is_dying = True
 
     return ohe
 
