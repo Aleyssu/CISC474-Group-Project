@@ -2,7 +2,7 @@ import gymnasium as gym
 from stable_baselines3.common.callbacks import EvalCallback
 import coverage_gridworld
 import time
-from stable_baselines3 import DQN, PPO
+from stable_baselines3 import DQN
 from stable_baselines3.common.env_checker import check_env
 
 maps = [
@@ -155,9 +155,6 @@ for i in range(num_episodes):
         # Sleep may be used to allow each step to be visualized. Value can be changed
         print(obs)
         time.sleep(0.04)
-        # break
-    # time.sleep(50)
-    # break
     if done:
         time.sleep(2)
 env.close()

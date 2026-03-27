@@ -1,5 +1,3 @@
-import persistent_env_info as pinfo
-import numpy as np
 from collections import deque
 
 # This tracks time-dependent information about the environment for determining more complex rewards and better observations
