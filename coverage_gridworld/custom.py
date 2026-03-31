@@ -1,8 +1,7 @@
-from collections import deque
-
 import numpy as np
 import gymnasium as gym
 import persistent_env_info as pinfo
+from collections import deque
 
 """
 Feel free to modify the functions below and experiment with different environment configurations.
@@ -47,8 +46,13 @@ _EXPLORED_FOV = _COLOR_ARRAY[6]
 
 # Local egocentric window for CNN: Man./Chebyshev radius 3 → (2*3+1)² = 7×7; agent at center.
 _LOCAL_PATCH_RADIUS = 3
-# Number of future timesteps to project enemy FOV for danger channels (t+1, t+2, t+3).
-_NUM_DANGER_STEPS = 1
+_LOCAL_ENEMY_RADIUS = _ENEMY_FOV_DISTANCE + 2
+# Number of future timesteps to project enemy FOV for danger channels.
+# 3 covers the full 4-phase enemy rotation cycle (t+0 is visible as red on the grid itself).
+_NUM_DANGER_STEPS = 3
+
+# Semantic binary channels per patch cell (see _local_patch_semantic).
+_NUM_SEMANTIC_CHANNELS = 6  # wall | explored | unexplored | agent | enemy | current_fov
 
 
 def _rgb_to_cell_type(cell_rgb: np.ndarray) -> int:
@@ -73,25 +77,42 @@ def _agent_row_col(grid: np.ndarray) -> tuple[int, int]:
     return int(ys[0]), int(xs[0])
 
 
-def _local_patch_onehot(grid: np.ndarray, r: int, c: int, radius: int) -> np.ndarray:
+def _local_patch_semantic(grid: np.ndarray, r: int, c: int, radius: int) -> np.ndarray:
     """
-    One-hot cell types in a (2*radius+1)² window centered on the agent.
-    Shape ``(_NUM_CELL_TYPES, side, side)`` channel-first for Stable-Baselines3 ``CnnPolicy``.
-    Out-of-map positions are typed as wall (see ``_cell_type_at``).
+    6 independent binary channels for the (2*radius+1)² window centered on the agent:
+      ch 0 — wall (including out-of-bounds)
+      ch 1 — explored (visited, with or without FOV overlay)
+      ch 2 — unexplored (not yet visited, with or without FOV overlay)
+      ch 3 — agent (center pixel)
+      ch 4 — enemy body
+      ch 5 — currently in enemy FOV (red = unvisited, pink = visited)
+    A cell can set multiple channels simultaneously (e.g. unexplored=1 AND current_fov=1).
+    Shape: (_NUM_SEMANTIC_CHANNELS, side, side), float32, values in {0, 1}.
     """
     side = 2 * radius + 1
-    out = np.zeros((_NUM_CELL_TYPES, side, side), dtype=np.float32)
+    out = np.zeros((_NUM_SEMANTIC_CHANNELS, side, side), dtype=np.float32)
     for pi in range(side):
         for pj in range(side):
             t = _cell_type_at(grid, r + pi - radius, c + pj - radius)
-            out[t, pi, pj] = 1.0
+            if t == 2:          # wall / OOB
+                out[0, pi, pj] = 1.0
+            elif t in (1, 6):   # explored (white or pink)
+                out[1, pi, pj] = 1.0
+            elif t in (0, 5):   # unexplored (black or red)
+                out[2, pi, pj] = 1.0
+            elif t == 3:        # agent
+                out[3, pi, pj] = 1.0
+            elif t == 4:        # enemy body
+                out[4, pi, pj] = 1.0
+            if t in (5, 6):     # currently in FOV (red or pink) — can overlap with ch1/ch2
+                out[5, pi, pj] = 1.0
     return out
 
 
 def _unexplored_mask(grid: np.ndarray) -> np.ndarray:
-    """1.0 where the cell is still uncoverable unexplored (black or enemy-FOV red)."""
+    """1.0 where the cell is unexplored (black = never visited, red = in enemy FOV but unvisited)."""
     black = np.all(grid == _COLOR_ARRAY[0], axis=-1)
-    red = np.all(grid == _COLOR_ARRAY[5], axis=-1)
+    red = np.all(grid == _UNEXPLORED_FOV, axis=-1)  # unvisited cell currently under enemy FOV
     return np.logical_or(black, red).astype(np.float32)
 
 
@@ -151,6 +172,39 @@ def _future_fov_channels(grid: np.ndarray, enemies_in_sight: list, agent_r: int,
 
 
 
+def _global_nav_signal(grid: np.ndarray, r: int, c: int) -> np.ndarray:
+    """
+    5-element global navigation signal giving a density-based view of where
+    unexplored cells are relative to the agent — no pathfinding, no FOV logic.
+
+    Returns float32 array of shape (5,):
+      [0] NW fraction  — share of unexplored cells in rows < r, cols < c
+      [1] NE fraction  — share of unexplored cells in rows < r, cols >= c
+      [2] SW fraction  — share of unexplored cells in rows >= r, cols < c
+      [3] SE fraction  — share of unexplored cells in rows >= r, cols >= c
+      [4] total fraction — unexplored / coverable cells (how much is left)
+
+    Quadrant fractions sum to 1 (or are all 0 when fully explored).
+    Walls and enemy positions are ignored — the agent sees those in the patch.
+    """
+    unexp = _unexplored_mask(grid)  # (H, W) float32
+    total = float(unexp.sum())
+    if total == 0.0:
+        return np.zeros(5, dtype=np.float32)
+
+    coverable = float(np.sum(
+        ~np.all(grid == _WALL_RGB, axis=-1) & ~np.all(grid == _ENEMY_RGB, axis=-1)
+    ))
+
+    nw = float(unexp[:r, :c].sum())
+    ne = float(unexp[:r, c:].sum())
+    sw = float(unexp[r:, :c].sum())
+    se = float(unexp[r:, c:].sum())
+
+    return np.array([nw / total, ne / total, sw / total, se / total,
+                     total / max(coverable, 1.0)], dtype=np.float32)
+
+
 def _nearest_unexplored_unit_direction(grid: np.ndarray, r: int, c: int) -> np.ndarray:
     """
     Rolling-horizon time-expanded BFS over states (row, col, phase), phase = t % 4.
@@ -172,6 +226,13 @@ def _nearest_unexplored_unit_direction(grid: np.ndarray, r: int, c: int) -> np.n
     """
     unexp = _unexplored_mask(grid) > 0.5
     if not np.any(unexp):
+        return np.zeros(2, dtype=np.float32)
+    
+    # On the very first observation enemies_in_sight hasn't been populated yet.
+    # Stay put so we don't walk into an unseen FOV on the very first step.
+    if (not pinfo.enemies_in_sight
+            and pinfo.pos_before_step is None
+            and np.any(np.all(grid == _ENEMY_RGB, axis=-1))):
         return np.zeros(2, dtype=np.float32)
 
     h, w = grid.shape[0], grid.shape[1]
@@ -202,10 +263,19 @@ def _nearest_unexplored_unit_direction(grid: np.ndarray, r: int, c: int) -> np.n
     fy_arr, fx_arr = np.where(cur_fov_mask)
     fov_sets[0].update(zip(fy_arr.tolist(), fx_arr.tolist()))
 
-    # Time-expanded BFS. State: (row, col, phase).
-    # Queue entries: (row, col, t, first_dr, first_dc).
-    # first_dr/dc stays None until the first expansion so we capture the seed's action.
-    moves = ((-1, 0), (0, 1), (1, 0), (0, -1), (0, 0))  # 4 dirs + STAY
+    # Order moves toward denser quadrants first so BFS prefers clustered areas.
+    nw = float(unexp[:r, :c].sum())
+    ne = float(unexp[:r, c:].sum())
+    sw = float(unexp[r:, :c].sum())
+    se = float(unexp[r:, c:].sum())
+    move_scores = {
+        (-1, 0): nw + ne,   # up → toward north quadrants
+        (1, 0):  sw + se,   # down → toward south quadrants
+        (0, -1): nw + sw,   # left → toward west quadrants
+        (0, 1):  ne + se,   # right → toward east quadrants
+        (0, 0):  -1,        # STAY — always last
+    }
+    moves = sorted(move_scores, key=move_scores.get, reverse=True)
     visited: set = {(r, c, 0)}
     q: deque = deque([(r, c, 0, None, None)])
 
@@ -213,6 +283,20 @@ def _nearest_unexplored_unit_direction(grid: np.ndarray, r: int, c: int) -> np.n
         y, x, t, fdr, fdc = q.popleft()
 
         if unexp[y, x] and (y, x) not in fov_sets[t % 4]:
+            # Trap check: can the agent leave this cell safely next step?
+            escape_phase = (t + 1) % 4
+            has_exit = False
+            for edr, edc in moves:
+                ey, ex = y + edr, x + edc
+                if ey < 0 or ey >= h or ex < 0 or ex >= w:
+                    continue
+                if np.array_equal(grid[ey, ex], _WALL_RGB) or np.array_equal(grid[ey, ex], _ENEMY_RGB):
+                    continue
+                if (ey, ex) not in fov_sets[escape_phase]:
+                    has_exit = True
+                    break
+            if not has_exit:
+                continue  # trapped — skip this cell, keep searching
             if fdr is None:
                 return np.zeros(2, dtype=np.float32)
             return np.array([float(fdr), float(fdc)], dtype=np.float32)
@@ -238,12 +322,14 @@ def _nearest_unexplored_unit_direction(grid: np.ndarray, r: int, c: int) -> np.n
     print('weird')
     return np.zeros(2, dtype=np.float32)
 
+
 def observation_space(env):
     """
     Dict observation for SB3 ``MultiInputPolicy``:
-    - ``patch``: one-hot cell types + future FOV danger, shape ``(_NUM_CELL_TYPES + _NUM_DANGER_STEPS, 2*r+1, 2*r+1)``.
-      Channels 0-6: cell type one-hot. Channels 7-9: binary danger at t+1, t+2, t+3.
-    - ``vector``: BFS first-step unit direction toward nearest unexplored, shape ``(2,)``, in [-1, 1].
+    - ``patch``: semantic binary channels + future FOV danger, shape ``(_NUM_SEMANTIC_CHANNELS + _NUM_DANGER_STEPS, 2*r+1, 2*r+1)`` = (9, 7, 7).
+      Ch 0: wall  Ch 1: explored  Ch 2: unexplored  Ch 3: agent  Ch 4: enemy  Ch 5: current FOV
+      Ch 6: danger t+1  Ch 7: danger t+2  Ch 8: danger t+3
+    - ``vector``: BFS direction (2,) — unit first-step toward nearest unexplored cell.
     """
     side = 2 * _LOCAL_PATCH_RADIUS + 1
     return gym.spaces.Dict(
@@ -251,7 +337,7 @@ def observation_space(env):
             "patch": gym.spaces.Box(
                 low=0.0,
                 high=1.0,
-                shape=(_NUM_CELL_TYPES + _NUM_DANGER_STEPS, side, side),
+                shape=(_NUM_SEMANTIC_CHANNELS + _NUM_DANGER_STEPS, side, side),
                 dtype=np.float32,
             ),
             "vector": gym.spaces.Box(
@@ -269,15 +355,16 @@ def observation(grid):
     cleared_cells = np.zeros((H, W), dtype=np.uint8)
     mask = np.logical_or(np.all(grid == (255, 255, 255), axis=-1), np.all(grid == (255, 127, 127), axis=-1))
     cleared_cells[mask] = 1
-    if np.sum(cleared_cells) == 0:
+    if np.sum(cleared_cells) == 0 and not pinfo.episode_reset_done:
         pinfo.reset_episode()
+        pinfo.episode_reset_done = True  # prevent re-clearing on STAY steps
 
     pinfo.last_grid = grid
     r, c = _agent_row_col(grid)
-    patch = _local_patch_onehot(grid, r, c, _LOCAL_PATCH_RADIUS)
+    patch = _local_patch_semantic(grid, r, c, _LOCAL_PATCH_RADIUS)
     danger = _future_fov_channels(grid, pinfo.enemies_in_sight, r, c, _LOCAL_PATCH_RADIUS)
-    toward = _nearest_unexplored_unit_direction(grid, r, c).astype(np.float32)
-    return {"patch": np.concatenate([patch, danger], axis=0), "vector": toward}
+    direction = _nearest_unexplored_unit_direction(grid, r, c)
+    return {"patch": np.concatenate([patch, danger], axis=0), "vector": direction}
 
 
 
@@ -312,22 +399,40 @@ def reward(info: dict) -> float:
     if info["game_over"]:
         r += _GAME_OVER_PENALTY
 
+    n_enemies = len(info["enemies"])
+    # Scale difficulty linearly with enemy count.
+    # 0 enemies → easy (fast finish rewarded); 4 enemies → hard (completion rewarded).
+    # Clamp at 4 so extra enemies on bonus maps don't break the scale.
+    t = min(n_enemies, 4) / 4.0  # 0.0 (no enemies) → 1.0 (4 enemies)
+    finish_bonus          = 10  + 40  * t   # 10  → 50
+    step_remain_multiplier = 0.4 - 0.36 * t  # 0.4 → 0.04
+    coverage_bonus        = 0.5 + 0.5  * t   # 2.0 → 2.5
+    revisit_penalty = -0.1 + 0.08 * t
+
     if info["cells_remaining"] == 0:
-        r += 10.0 + info["steps_remaining"] * 0.05
+        r += finish_bonus + info["steps_remaining"] * step_remain_multiplier
 
     if info["new_cell_covered"]:
-        r += 1
+        r += coverage_bonus
 
+    
+    if info["cells_remaining"] > 0 and info["steps_remaining"] == 0:
+        r += -100
+    
+    
     curr = int(info["agent_pos"])
     pinfo.cell_visit_counts[curr] = pinfo.cell_visit_counts.get(curr, 0) + 1
     n_visits = pinfo.cell_visit_counts[curr]
-    # only count an visit if it moved
+    # Only penalise revisits when the agent actually moved to the cell.
+    # Without this guard, STAY increments the count every step and the
+    # penalty grows quadratically (−0.1 * 1, −0.1 * 2, …, −0.1 * 499).
     if pinfo.pos_before_step is None or curr != pinfo.pos_before_step:
         num_revisits = n_visits - 1
         if num_revisits > 0:
-            r += _REVISIT_FLAT * num_revisits
+            r += revisit_penalty * num_revisits
     
     # should never have to wait more than 3 steps for clear
+    
     if pinfo.prev_agent_pos_for_streak is None:
         pinfo.same_cell_streak = 0
     elif curr == pinfo.prev_agent_pos_for_streak:
@@ -337,7 +442,7 @@ def reward(info: dict) -> float:
 
     if pinfo.same_cell_streak > _IDLE_STREAK_THRESHOLD:
         r += _IDLE_STREAK_PENALTY
-
+    
     
     '''
     if (
@@ -348,7 +453,7 @@ def reward(info: dict) -> float:
     ):
         r += -1.0
     '''
-
+    '''
     if pinfo.last_grid is not None and info["enemies"]:
         agent_row, agent_col = curr // 10, curr % 10
         if (agent_row, agent_col) in _next_step_fov_cells(info["enemies"], pinfo.last_grid):
@@ -357,7 +462,7 @@ def reward(info: dict) -> float:
                 r += _NEXT_FOV_PENALTY * 0.1
             else:
                 r += _NEXT_FOV_PENALTY
-
+    '''
     #pinfo.pos_history.append(curr)
     pinfo.prev_agent_pos_for_streak = curr
     pinfo.pos_before_step = curr
@@ -370,7 +475,12 @@ def reward(info: dict) -> float:
     pinfo.enemies_in_sight = [
         (enemy.y, enemy.x, (enemy.orientation + 1) % 4)
         for enemy in info["enemies"]
-        if max(abs(enemy.y - agent_row), abs(enemy.x - agent_col)) <= _LOCAL_PATCH_RADIUS
+        if max(abs(enemy.y - agent_row), abs(enemy.x - agent_col)) <= _LOCAL_ENEMY_RADIUS
     ]
+
+    # Re-arm the episode-reset guard so the next episode's first observation()
+    # call will properly clear all state.
+    if info["game_over"] or info["steps_remaining"] == 0 or info["cells_remaining"] == 0:
+        pinfo.episode_reset_done = False
 
     return r
