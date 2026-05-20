@@ -1,4 +1,5 @@
-# CISC474-Group-Project
+# Gridworld Reinforcement Learning Agent
+A reinforcement learning agent implemented in stable diffusion to fully explore a grid-based map with predefined enemies and obstacles.
 
 Install required packages with
 ```bash
